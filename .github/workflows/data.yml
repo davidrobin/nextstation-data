@@ -1,0 +1,75 @@
+name: Données Prochaine gare
+
+# Chaque nuit : horaires SNCF + IDFM (GTFS) → lines.json, timetables.json, manifest.json
+# publiés sur GitHub Pages, où l'app les télécharge.
+on:
+  schedule:
+    - cron: "17 2 * * *"   # 3 h 17 / 4 h 17 heure de Paris
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ["tools/**", ".github/workflows/data.yml"]
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Tracé des voies (SNCF Réseau) : change rarement, gardé en cache d'une nuit à l'autre
+      - uses: actions/cache@v4
+        with:
+          path: build/cache/rfn_0.dat
+          key: rfn-v1
+
+      - name: Horaires (GTFS SNCF et IDFM, toujours retéléchargés)
+        run: |
+          mkdir -p build/cache site
+          rm -f build/cache/*-gtfs.zip
+          python3 tools/build_gtfs.py --out site/lines.json --cache build/cache
+
+      - name: Tracé des voies
+        run: python3 tools/build_shapes.py --lines site/lines.json --cache build/cache
+
+      - name: Manifeste
+        run: python3 tools/make_manifest.py site
+
+      - name: Contrôle
+        run: |
+          python3 - <<'PY'
+          import json
+          tt = json.load(open("site/timetables.json"))
+          lines = json.load(open("site/lines.json"))
+          n = sum(len(l["trips"]) for l in tt["lines"].values())
+          print(len(lines["lines"]), "lignes,", n, "circulations")
+          assert len(lines["lines"]) >= 20, "trop peu de lignes"
+          assert n >= 5000, "trop peu de circulations : GTFS périmé ?"
+          PY
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
