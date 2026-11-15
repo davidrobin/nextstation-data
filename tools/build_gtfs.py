@@ -587,10 +587,22 @@ def idfm_lines(path, reg):
             tstops = trip_stations(seq, idfm_station_id)
             m = meta.get(tid, {})
             number = (m.get("trip_short_name") or "").strip()
-            if tstops and number.isdigit():
-                trips.append({"number": number, "mission": (m.get("trip_headsign") or "").strip()[:8],
+            headsign = (m.get("trip_headsign") or "").strip()
+            if not tstops:
+                continue
+            if number.isdigit():
+                trips.append({"number": number, "mission": headsign[:8],
+                              "days": calendar.get(m.get("service_id"), set()), "stops": tstops})
+            else:
+                # RER A / B (RATP) : pas de numéro de train public, seulement un code mission
+                # (« QIKI »). Identifiant interne « ~CODE+heure de départ », jamais affiché tel quel.
+                code = number if number.isalpha() else (headsign if headsign.isalpha() and len(headsign) <= 6 else "")
+                code = code.upper()[:8]
+                synthetic = "~%s%04d" % (code or "X", tstops[0][2] // 60)
+                trips.append({"number": synthetic, "mission": code,
                               "days": calendar.get(m.get("service_id"), set()), "stops": tstops})
         attach_trips(lines[-1], trips)
+        print("  %-8s %5d circulations, %5d rattachées" % (short, len(trips), len(lines[-1]["_trips"])))
     return lines
 
 
