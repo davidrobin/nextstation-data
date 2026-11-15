@@ -448,6 +448,8 @@ def main():
                        "olat": s.get("olat", s["lat"]), "olon": s.get("olon", s["lon"])}
                 if s.get("idfm"):
                     ins["idfm"] = s["idfm"]   # zones d'arrêt IDFM (temps réel PRIM)
+                if s.get("exits"):
+                    ins["exits"] = s["exits"]   # entrées de la gare (carte)
                 items.append((along, 0, ins))
             items.sort(key=lambda x: (x[0], x[1]))
             br["stations"] = [x[2] for x in items]

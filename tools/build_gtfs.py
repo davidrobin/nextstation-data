@@ -690,24 +690,39 @@ def attach_idfm_refs(path, lines, radius=600):
     return n
 
 
-def report_entrances(path, probe=("Saint-Germain-en-Laye", "Versailles Chantiers", "Gazeran")):
-    """Diagnostic : entrées / sorties (location_type = 2) présentes dans le GTFS IDFM."""
-    from collections import Counter
+def attach_exits(path, lines, radius=250):
+    """Entrées / sorties des gares d'Île-de-France (GTFS IDFM, location_type = 2).
+
+    Champ `exits` : [[nom, lat, lon], …], entrées rattachées à une zone d'arrêt de la gare
+    (champ `idfm`), à défaut celles à moins de `radius` m. Ordre : par nom (le GTFS n'indique
+    pas d'entrée principale)."""
     z = zipfile.ZipFile(path)
-    rows = list(read_csv(z, zip_member(z, "stops.txt")))
-    by_id = {r["stop_id"]: r for r in rows}
-    types = Counter(r.get("location_type") or "0" for r in rows)
-    print("  [accès] location_type :", dict(types))
-    entr = [r for r in rows if (r.get("location_type") or "") == "2"]
-    print("  [accès] entrées : %d, préfixes : %s" % (len(entr), dict(Counter(r["stop_id"].rsplit(":", 1)[0] for r in entr).most_common(5))))
-    print("  [accès] colonnes stops.txt :", list(rows[0].keys()) if rows else [])
-    print("  [accès] fichiers :", [n for n in z.namelist()])
-    for name in probe:
-        parents = {r["stop_id"] for r in rows if (r.get("stop_name") or "").startswith(name) and (r.get("location_type") or "") == "1"}
-        hits = [r for r in entr if (r.get("parent_station") or "") in parents]
-        print("  [accès] %s : zones %s, %d entrées" % (name, sorted(parents)[:4], len(hits)))
-        for r in hits[:8]:
-            print("     ", r["stop_id"], "|", r.get("stop_name"), "|", r.get("stop_lat"), r.get("stop_lon"), "|", r.get("parent_station"))
+    by_parent, allx = defaultdict(list), []
+    for r in read_csv(z, zip_member(z, "stops.txt")):
+        if (r.get("location_type") or "") != "2":
+            continue
+        try:
+            lat, lon = round(float(r["stop_lat"]), 6), round(float(r["stop_lon"]), 6)
+        except ValueError:
+            continue
+        e = [(r.get("stop_name") or "").strip(), lat, lon]
+        by_parent[(r.get("parent_station") or "").replace("IDFM:", "")].append(e)
+        allx.append(e)
+    n = 0
+    for line in lines:
+        for b in line["branches"]:
+            for st in b["stations"]:
+                if st.get("wp"):
+                    continue
+                found = [e for ref in st.get("idfm", []) for e in by_parent.get(ref, [])]
+                if not found and st.get("idfm"):
+                    found = [e for e in allx if abs(e[1] - st["lat"]) < 0.005 and abs(e[2] - st["lon"]) < 0.007
+                             and hav((st["lat"], st["lon"]), (e[1], e[2])) <= radius]
+                uniq = sorted({(e[0], e[1], e[2]) for e in found})
+                if uniq:
+                    st["exits"] = [list(e) for e in uniq]
+                    n += 1
+    return n
 
 
 def _idfm_station(stop):
@@ -738,10 +753,8 @@ def main():
 
     lines = idf + sorted(ter, key=lambda l: (l["group"], l["name"]))
     n_refs = attach_idfm_refs(idfm, lines)
-    try:
-        report_entrances(idfm)
-    except Exception as e:
-        print("  [accès] diagnostic impossible :", e)
+    n_exits = attach_exits(idfm, lines)
+    print("✓ entrées de gare pour %d gares (Île-de-France)" % n_exits)
     timetables = build_timetables(lines, args.days)
     tt_path = os.path.join(os.path.dirname(args.out), "timetables.json")
     with open(tt_path, "w", encoding="utf-8") as f:
