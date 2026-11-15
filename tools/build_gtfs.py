@@ -690,6 +690,26 @@ def attach_idfm_refs(path, lines, radius=600):
     return n
 
 
+def report_entrances(path, probe=("Saint-Germain-en-Laye", "Versailles Chantiers", "Gazeran")):
+    """Diagnostic : entrées / sorties (location_type = 2) présentes dans le GTFS IDFM."""
+    from collections import Counter
+    z = zipfile.ZipFile(path)
+    rows = list(read_csv(z, zip_member(z, "stops.txt")))
+    by_id = {r["stop_id"]: r for r in rows}
+    types = Counter(r.get("location_type") or "0" for r in rows)
+    print("  [accès] location_type :", dict(types))
+    entr = [r for r in rows if (r.get("location_type") or "") == "2"]
+    print("  [accès] entrées : %d, préfixes : %s" % (len(entr), dict(Counter(r["stop_id"].rsplit(":", 1)[0] for r in entr).most_common(5))))
+    print("  [accès] colonnes stops.txt :", list(rows[0].keys()) if rows else [])
+    print("  [accès] fichiers :", [n for n in z.namelist()])
+    for name in probe:
+        parents = {r["stop_id"] for r in rows if (r.get("stop_name") or "").startswith(name) and (r.get("location_type") or "") == "1"}
+        hits = [r for r in entr if (r.get("parent_station") or "") in parents]
+        print("  [accès] %s : zones %s, %d entrées" % (name, sorted(parents)[:4], len(hits)))
+        for r in hits[:8]:
+            print("     ", r["stop_id"], "|", r.get("stop_name"), "|", r.get("stop_lat"), r.get("stop_lon"), "|", r.get("parent_station"))
+
+
 def _idfm_station(stop):
     area, name, lat, lon = stop
     return (area, nice_name(name), lat, lon)
@@ -718,6 +738,10 @@ def main():
 
     lines = idf + sorted(ter, key=lambda l: (l["group"], l["name"]))
     n_refs = attach_idfm_refs(idfm, lines)
+    try:
+        report_entrances(idfm)
+    except Exception as e:
+        print("  [accès] diagnostic impossible :", e)
     timetables = build_timetables(lines, args.days)
     tt_path = os.path.join(os.path.dirname(args.out), "timetables.json")
     with open(tt_path, "w", encoding="utf-8") as f:
