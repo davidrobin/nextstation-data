@@ -1,0 +1,54 @@
+name: Historique des longueurs de train
+
+# Toutes les heures de 5 h à 23 h (heure de Paris, à peu près) : longueur annoncée de chaque
+# train (PRIM, requête globale), gardée 42 jours dans la branche « history ».
+on:
+  schedule:
+    - cron: "41 3-22 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: lengths
+  cancel-in-progress: false
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Branche history
+        run: |
+          git fetch origin history || true
+          mkdir -p history
+          if git rev-parse --verify -q origin/history >/dev/null; then
+            git show origin/history:lengths.json > history/lengths.json || true
+          fi
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Collecte
+        env:
+          PRIM_API_KEY: ${{ secrets.PRIM_API_KEY }}
+        run: |
+          test -n "$PRIM_API_KEY" || { echo "Secret PRIM_API_KEY manquant (Settings › Secrets and variables › Actions)"; exit 1; }
+          python3 tools/collect_lengths.py history/lengths.json
+
+      - name: Enregistrement
+        # Un seul commit, remplacé à chaque fois : la branche ne grossit pas
+        run: |
+          cp history/lengths.json /tmp/lengths.json
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -q --orphan history-new
+          git rm -rqf --cached .
+          cp /tmp/lengths.json lengths.json
+          git add lengths.json
+          git commit -qm "Longueurs $(date -u +%Y-%m-%dT%H:%MZ)"
+          git push -qf origin history-new:history
