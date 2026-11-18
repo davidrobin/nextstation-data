@@ -725,6 +725,105 @@ def attach_exits(path, lines, radius=250):
     return n
 
 
+URBAN_MODES = {"1": "metro", "0": "tram"}
+
+
+def urban_network(path):
+    """Métro et tramway d'Île-de-France, pour des tableaux en temps réel (PRIM) seulement.
+
+    Pas d'horaires détaillés : par ligne, un résumé par type de jour (premier et dernier
+    passage, intervalle médian en pointe, en heures creuses et en soirée) pour le repli sans
+    réseau. Par station (zone d'arrêt du mode) : nom, position, zones IDFM pour PRIM, lignes."""
+    import datetime as dt
+    from statistics import median
+    z = zipfile.ZipFile(path)
+    rows = {r["stop_id"]: r for r in read_csv(z, zip_member(z, "stops.txt"))}
+    routes = {}
+    for r in read_csv(z, zip_member(z, "routes.txt")):
+        mode = URBAN_MODES.get(r.get("route_type", ""))
+        short = (r.get("route_short_name") or "").strip()
+        if mode and short:
+            routes[r["route_id"]] = (mode, short, r)
+    trips = {r["trip_id"]: r for r in read_csv(z, zip_member(z, "trips.txt")) if r["route_id"] in routes}
+    trip_route = {t: r["route_id"] for t, r in trips.items()}
+    _, _, seqs = load_patterns(z, trip_route)
+    calendar = load_calendar(z)
+
+    def tail(sid):
+        return sid.rsplit(":", 1)[-1]
+
+    # Dates de référence : prochain mardi, samedi et dimanche
+    today = dt.date.today()
+    def next_day(wd):
+        return (today + dt.timedelta(days=(wd - today.weekday()) % 7)).strftime("%Y%m%d")
+    ref_days = {"wd": next_day(1), "sa": next_day(5), "su": next_day(6)}
+
+    lines, stations = {}, {}
+    times = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))   # {ligne: {jour: {(arrêt, sens): [min]}}}
+    for tid, seq in seqs.items():
+        mode, short, r = routes[trip_route[tid]]
+        lid = ("M" if mode == "metro" else "") + short
+        line = lines.setdefault(lid, {
+            "id": lid, "idfmLine": tail(r["route_id"]), "mode": mode, "shortName": short,
+            "name": ("Métro " if mode == "metro" else "Tram ") + short,
+            "color": "#" + ((r.get("route_color") or "888888").lstrip("#")[:6]),
+            "textColor": "#" + ((r.get("route_text_color") or "FFFFFF").lstrip("#")[:6]),
+        })
+        days = calendar.get(trips[tid].get("service_id"), set())
+        direction = trips[tid].get("direction_id") or "0"
+        for _, stop, arr, dep in seq:
+            quai = rows.get(stop, {})
+            parent = rows.get(quai.get("parent_station") or "", {})
+            area = parent or quai
+            if not area:
+                continue
+            sid = tail(area["stop_id"])
+            st = stations.get(sid)
+            if st is None:
+                grand = rows.get(area.get("parent_station") or "", {})
+                try:
+                    lat, lon = round(float(area["stop_lat"]), 6), round(float(area["stop_lon"]), 6)
+                except (KeyError, ValueError):
+                    continue
+                refs = [sid] + ([tail(grand["stop_id"])] if grand else [])
+                st = stations[sid] = {"id": sid, "name": nice_name(area.get("stop_name") or ""),
+                                      "lat": lat, "lon": lon, "refs": refs, "lines": []}
+            if lid not in st["lines"]:
+                st["lines"].append(lid)
+            t = dep if dep is not None else arr
+            if t is None:
+                continue
+            for key, day in ref_days.items():
+                if day in days:
+                    times[lid][key][(sid, direction)].append(t // 60)
+
+    for lid, line in lines.items():
+        summary = {}
+        for key in ref_days:
+            by_stop = times[lid].get(key) or {}
+            if not by_stop:
+                continue
+            all_t = [t for ts in by_stop.values() for t in ts]
+            ref = sorted(max(by_stop.values(), key=len))
+            def gap(a, b):
+                g = [y - x for x, y in zip(ref, ref[1:]) if a * 60 <= x < b * 60 and y > x]
+                return int(round(median(g))) if g else None
+            summary[key] = [min(all_t), max(all_t), gap(7, 9), gap(10, 16), gap(21, 24)]
+        line["summary"] = summary
+
+    def order(l):
+        num = re.match(r"\d+", l["shortName"].lstrip("T"))
+        return (l["mode"] != "metro", int(num.group()) if num else 99, l["shortName"])
+    out_lines = sorted(lines.values(), key=order)
+    rank = {l["id"]: i for i, l in enumerate(out_lines)}
+    out_st = []
+    for st in stations.values():
+        st["lines"].sort(key=lambda x: rank.get(x, 99))
+        out_st.append(st)
+    out_st.sort(key=lambda s: s["name"])
+    return {"lines": out_lines, "stations": out_st}
+
+
 def _idfm_station(stop):
     area, name, lat, lon = stop
     return (area, nice_name(name), lat, lon)
@@ -761,10 +860,16 @@ def main():
         json.dump(timetables, f, ensure_ascii=False, separators=(",", ":"))
     for l in lines:
         l.pop("_trips", None)
+    print("→ Métro et tramway (temps réel seulement)…")
+    urban = urban_network(idfm)
+    print("✓ %d lignes de métro et de tram, %d stations" % (len(urban["lines"]), len(urban["stations"])))
+    for l in urban["lines"]:
+        print("    %-5s %-10s %s" % (l["id"], l["idfmLine"], l["summary"].get("wd")))
     catalog = {
         "version": 2,
         "source": "Horaires théoriques IDFM et SNCF (GTFS) · Tracé : SNCF Réseau (ODbL)",
         "lines": lines,
+        "urban": urban,
     }
     with open(args.out, "w", encoding="utf-8") as f:
         json.dump(catalog, f, ensure_ascii=False, indent=1)
