@@ -765,7 +765,9 @@ def urban_network(path):
 
     lines, stations = {}, {}
     times = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))   # {ligne: {jour: {(arrêt, sens): [min]}}}
+    patterns = defaultdict(lambda: defaultdict(int))   # {ligne: {(station…): nb}}
     for tid, seq in seqs.items():
+        visited = []
         mode, short, r = routes[trip_route[tid]]
         lid = ("M" if mode == "metro" else "") + short
         line = lines.setdefault(lid, {
@@ -796,12 +798,17 @@ def urban_network(path):
                                       "lat": lat, "lon": lon, "refs": refs, "lines": []}
             if lid not in st["lines"]:
                 st["lines"].append(lid)
+            st.setdefault("_quais", set()).add(tail(stop))
+            if not visited or visited[-1] != sid:
+                visited.append(sid)
             t = dep if dep is not None else arr
             if t is None:
                 continue
             for key, day in ref_days.items():
                 if day in days:
                     times[lid][key][(sid, direction)].append(t // 60)
+        if len(visited) >= 2:
+            patterns[lid][tuple(visited)] += 1
 
     for lid, line in lines.items():
         summary = {}
@@ -817,6 +824,16 @@ def urban_network(path):
                 return int(round(median(g))) if g else None
             summary[key] = [min(all_t), max(all_t), gap(7, 9), gap(10, 16), gap(21, 24)]
         line["summary"] = summary
+        # Parcours (sens de marche) : les plus fréquents, sans ceux inclus dans un autre
+        counted = patterns[lid]
+        total = sum(counted.values()) or 1
+        keep = [p for p, n in counted.items() if n >= 10 and n >= 0.01 * total]
+        keep.sort(key=len, reverse=True)
+        maximal = []
+        for p in keep:
+            if not any(is_subseq(p, q) for q in maximal):
+                maximal.append(p)
+        line["patterns"] = [list(p) for p in maximal]
 
     def order(l):
         num = re.match(r"\d+", l["shortName"].lstrip("T"))
@@ -826,6 +843,7 @@ def urban_network(path):
     out_st = []
     for st in stations.values():
         st["lines"].sort(key=lambda x: rank.get(x, 99))
+        st["quais"] = sorted(st.pop("_quais", set()))
         out_st.append(st)
     out_st.sort(key=lambda s: s["name"])
     return {"lines": out_lines, "stations": out_st}
@@ -871,10 +889,11 @@ def main():
     urban = urban_network(idfm)
     print("✓ %d lignes de métro et de tram, %d stations" % (len(urban["lines"]), len(urban["stations"])))
     for l in urban["lines"]:
-        print("    %-5s %-10s %s" % (l["id"], l["idfmLine"], l["summary"].get("wd")))
+        print("    %-5s %-10s %s · %d parcours %s" % (l["id"], l["idfmLine"], l["summary"].get("wd"),
+                                                  len(l["patterns"]), [len(p) for p in l["patterns"]]))
     for st in urban["stations"]:
         if st["name"].startswith(("Châtelet", "Montparnasse", "La Défense", "Porte de Versailles")):
-            print("    ·", st)
+            print("    ·", {k: v for k, v in st.items() if k != "quais"}, len(st["quais"]), "quais")
     catalog = {
         "version": 2,
         "source": "Horaires théoriques IDFM et SNCF (GTFS) · Tracé : SNCF Réseau (ODbL)",
