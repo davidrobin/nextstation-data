@@ -738,6 +738,11 @@ def urban_network(path):
     from statistics import median
     z = zipfile.ZipFile(path)
     rows = {r["stop_id"]: r for r in read_csv(z, zip_member(z, "stops.txt"))}
+    # Zones d'arrêts monomodales (une par mode) rattachées à chaque zone de correspondance
+    monos = defaultdict(list)
+    for r in rows.values():
+        if r["stop_id"].startswith("IDFM:monomodalStopPlace:") and r.get("parent_station"):
+            monos[r["parent_station"]].append(r["stop_id"].rsplit(":", 1)[-1])
     routes = {}
     for r in read_csv(z, zip_member(z, "routes.txt")):
         mode = URBAN_MODES.get(r.get("route_type", ""))
@@ -785,7 +790,8 @@ def urban_network(path):
                     lat, lon = round(float(area["stop_lat"]), 6), round(float(area["stop_lon"]), 6)
                 except (KeyError, ValueError):
                     continue
-                refs = [sid] + ([tail(grand["stop_id"])] if grand else [])
+                # PRIM : la zone de correspondance, puis ses zones monomodales (métro, tram…)
+                refs = [sid] + sorted(set(monos.get(area["stop_id"], [])))[:6] + ([tail(grand["stop_id"])] if grand else [])
                 st = stations[sid] = {"id": sid, "name": nice_name(area.get("stop_name") or ""),
                                       "lat": lat, "lon": lon, "refs": refs, "lines": []}
             if lid not in st["lines"]:
