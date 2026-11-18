@@ -803,7 +803,8 @@ def urban_network(path):
             by_stop = times[lid].get(key) or {}
             if not by_stop:
                 continue
-            all_t = [t for ts in by_stop.values() for t in ts]
+            # Passages avant 4 h : fin de la nuit précédente (comptés après minuit)
+            all_t = [t + 1440 if t < 240 else t for ts in by_stop.values() for t in ts]
             ref = sorted(max(by_stop.values(), key=len))
             def gap(a, b):
                 g = [y - x for x, y in zip(ref, ref[1:]) if a * 60 <= x < b * 60 and y > x]
@@ -865,6 +866,9 @@ def main():
     print("✓ %d lignes de métro et de tram, %d stations" % (len(urban["lines"]), len(urban["stations"])))
     for l in urban["lines"]:
         print("    %-5s %-10s %s" % (l["id"], l["idfmLine"], l["summary"].get("wd")))
+    for st in urban["stations"]:
+        if st["name"].startswith(("Châtelet", "Montparnasse", "La Défense", "Porte de Versailles")):
+            print("    ·", st)
     catalog = {
         "version": 2,
         "source": "Horaires théoriques IDFM et SNCF (GTFS) · Tracé : SNCF Réseau (ODbL)",
