@@ -1,25 +1,25 @@
 #!/usr/bin/env python3
-"""Ajoute le tracé réel des voies (SNCF Réseau, open data) aux branches de lines.json.
+"""Adds the real track geometry (SNCF Réseau, open data) to the branches of lines.json.
 
-Usage, depuis le dossier du projet :
+Usage, from the project folder:
     python3 Tools/build_shapes.py
-    python3 Tools/build_shapes.py --rfn chemin/vers/lignes_rfn.json   # fichier déjà téléchargé
+    python3 Tools/build_shapes.py --rfn path/to/lignes_rfn.json   # file already downloaded
 
-Source : « Fichier de formes des lignes du Réseau Ferré National » (SNCF Réseau,
-data.gouv.fr, licence ODbL), lignes exploitées uniquement. Mis en cache dans build/cache/.
+Source: « Fichier de formes des lignes du Réseau Ferré National » (SNCF Réseau,
+data.gouv.fr, ODbL license), operated lines only. Cached in build/cache/.
 
-Étapes :
-  1. Construit un graphe du réseau ferré (lignes RFN reliées à leurs jonctions).
-  2. Pour chaque paire de gares consécutives d'une branche, cherche l'itinéraire le
-     plus court sur ce graphe (A*), le simplifie (Douglas-Peucker, 5 m) et l'insère
-     sous forme de points de tracé {"id": "wp", "stop": false, "wp": true}.
-     Chaque gare est recalée sur la voie (position d'origine gardée dans olat/olon).
-  3. Ajoute les gares situées sur le tracé mais absentes de la branche :
-     desservies par la ligne → stop: true ; sinon traversées → stop: false ("ins": true).
-  4. Supprime les branches devenues redondantes.
-Sans itinéraire fiable, un tronçon reste en ligne droite (signalé).
+Steps:
+  1. Builds a graph of the rail network (RFN lines connected at their junctions).
+  2. For each pair of consecutive stations of a branch, looks for the shortest
+     route on this graph (A*), simplifies it (Douglas-Peucker, 5 m) and inserts it
+     as track points {"id": "wp", "stop": false, "wp": true}.
+     Each station is snapped to the track (original position kept in olat/olon).
+  3. Adds the stations located on the track but missing from the branch:
+     served by the line → stop: true; otherwise passed → stop: false ("ins": true).
+  4. Removes the branches that became redundant.
+Without a reliable route, a section stays a straight line (reported).
 
-Idempotent. Python 3.9+, bibliothèque standard uniquement (téléchargement via curl).
+Idempotent. Python 3.9+, standard library only (downloads via curl).
 """
 import argparse
 import csv
@@ -38,16 +38,16 @@ RFN_URLS = [
     "https://www.data.gouv.fr/api/1/datasets/r/a9c45a65-fba8-443c-a860-c959d1b5fb52",
 ]
 
-SNAP_DIST = 300.0       # distance max gare ↔ voie (m)
-JUNCTION_DIST = 40.0    # une extrémité de ligne à moins de 40 m d'une autre ligne = jonction
-SIMPLIFY_TOL = 5.0      # tolérance Douglas-Peucker (m)
-MAX_RATIO = 1.8         # longueur itinéraire / vol d'oiseau au-delà de laquelle on rejette
-INSERT_DIST = 80.0      # une gare à moins de 80 m du tracé est sur la branche
-CELL = 0.01             # index spatial (degrés)
+SNAP_DIST = 300.0       # max station ↔ track distance (m)
+JUNCTION_DIST = 40.0    # a line end less than 40 m from another line = junction
+SIMPLIFY_TOL = 5.0      # Douglas-Peucker tolerance (m)
+MAX_RATIO = 1.8         # route / straight-line length ratio above which the route is rejected
+INSERT_DIST = 80.0      # a station less than 80 m from the track is on the branch
+CELL = 0.01             # spatial index (degrees)
 R = 6371008.8
 
 
-# --- Géométrie ---------------------------------------------------------------
+# --- Geometry --------------------------------------------------------------------
 
 def hav(a, b):
     p1, p2 = math.radians(a[0]), math.radians(b[0])
@@ -103,10 +103,10 @@ def cells(a, b, pad=0):
     return [(i, j) for i in range(i0 - pad, i1 + pad + 1) for j in range(j0 - pad, j1 + pad + 1)]
 
 
-# --- Chargement du RFN -------------------------------------------------------
+# --- Loading the RFN -------------------------------------------------------------
 
 def find_geometries(obj, out):
-    """Collecte les (Multi)LineString des lignes exploitées, quel que soit le format JSON."""
+    """Collects the (Multi)LineStrings of the operated lines, whatever the JSON format."""
     if isinstance(obj, dict):
         status = obj.get("mnemo") or (obj.get("properties") or {}).get("mnemo")
         if status and status != "EXPLOITE":
@@ -169,17 +169,17 @@ def load_rfn(path_arg, cache_dir):
     sys.exit("Impossible d'obtenir le fichier RFN. Télécharge-le à la main et passe --rfn <fichier>.")
 
 
-# --- Graphe du réseau ferré ---------------------------------------------------
+# --- Rail network graph ----------------------------------------------------------
 
 class Graph:
     def __init__(self, polylines, bbox):
         lat0, lat1, lon0, lon1 = bbox
-        self.pos = []                       # nœud → (lat, lon)
-        self.adj = defaultdict(list)        # nœud → [(voisin, longueur)]
+        self.pos = []                       # node → (lat, lon)
+        self.adj = defaultdict(list)        # node → [(neighbor, length)]
         self.edges = []                     # (u, v)
-        self.edge_line = []                 # arête → index de la ligne RFN
-        self.grid = defaultdict(list)       # cellule → [index d'arête]
-        self.splits = {}                    # arête → [(t, nœud)] points intermédiaires triés
+        self.edge_line = []                 # edge → index of the RFN line
+        self.grid = defaultdict(list)       # cell → [edge index]
+        self.splits = {}                    # edge → [(t, node)] intermediate points, sorted
         ends = []
         for li, pl in enumerate(polylines):
             if not any(lat0 <= p[0] <= lat1 and lon0 <= p[1] <= lon1 for p in pl):
@@ -191,7 +191,7 @@ class Graph:
             for u, v in zip(ids, ids[1:]):
                 self._add_edge(u, v, li)
             ends += [ids[0], ids[-1]]
-        # Jonctions : extrémité d'une ligne posée sur une autre ligne
+        # Junctions: end of a line lying on another line
         n_edges = len(self.edges)
         for e in ends:
             for ei, t, d in self._near_edges(self.pos[e], JUNCTION_DIST, limit=n_edges):
@@ -218,10 +218,10 @@ class Graph:
         self.adj[v].append((u, w))
 
     def _split(self, ei, t):
-        """Nœud au point t de l'arête ei (réutilise une extrémité si t ≈ 0 ou 1).
+        """Node at point t of edge ei (reuses an end if t ≈ 0 or 1).
 
-        Les points d'une même arête sont chaînés dans l'ordre (u … w … v) pour qu'un
-        itinéraire entre deux gares posées sur la même arête ne fasse pas d'aller-retour."""
+        Points of the same edge are chained in order (u … w … v) so that a
+        route between two stations lying on the same edge does not go back and forth."""
         u, v = self.edges[ei]
         if t <= 0.001:
             return u
@@ -260,9 +260,9 @@ class Graph:
         return out
 
     def snap(self, p, max_candidates=4):
-        """Nœuds candidats pour une gare : projection sur chaque ligne RFN proche
-        (plusieurs lignes parallèles passent souvent à quelques mètres l'une de l'autre).
-        Renvoie [(nœud, distance)], la plus proche d'abord."""
+        """Candidate nodes for a station: projection on each nearby RFN line
+        (several parallel lines often run a few meters from each other).
+        Returns [(node, distance)], nearest first."""
         out, lines = [], set()
         for ei, t, d in self._near_edges(p, SNAP_DIST):
             line = self.edge_line[ei]
@@ -275,7 +275,7 @@ class Graph:
         return out
 
     def shortest(self, a, b, max_len):
-        """A* entre les nœuds a et b ; renvoie la liste de positions ou None."""
+        """A* between nodes a and b; returns the list of positions or None."""
         goal = self.pos[b]
         dist = {a: 0.0}
         prev = {}
@@ -300,7 +300,7 @@ class Graph:
 
 
 def best_route(graph, cands_a, cands_b, direct):
-    """Itinéraire le plus court entre deux gares, parmi leurs voies candidates."""
+    """Shortest route between two stations, among their candidate tracks."""
     best, best_len = None, math.inf
     combos = sorted(((da + db, na, nb) for na, da in cands_a for nb, db in cands_b), key=lambda x: x[0])
     for snap_cost, na, nb in combos:
@@ -313,11 +313,11 @@ def best_route(graph, cands_a, cands_b, direct):
             if L < best_len:
                 best, best_len = path, L
             if L <= direct * 1.15 + 300:
-                break   # assez bon : inutile d'essayer les autres voies
+                break   # good enough: no need to try the other tracks
     return best
 
 
-# --- Programme principal ------------------------------------------------------
+# --- Main program ----------------------------------------------------------------
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
@@ -329,7 +329,7 @@ def main():
     with open(args.lines, encoding="utf-8") as f:
         catalog = json.load(f)
 
-    # Repartir des gares d'origine (idempotence)
+    # Start again from the original stations (idempotence)
     for line in catalog["lines"]:
         for br in line["branches"]:
             st = []
@@ -360,7 +360,7 @@ def main():
         print("⚠ %d gares à plus de %d m d'une voie RFN (souterrain, réseau RATP…) : %s" % (
             len(no_track), SNAP_DIST, ", ".join(no_track[:15]) + (" …" if len(no_track) > 15 else "")))
 
-    # Gares indexées pour l'étape 3
+    # Stations indexed for step 3
     st_grid = defaultdict(list)
     for sid, s in all_st.items():
         st_grid[(int(math.floor(s["lat"] / CELL)), int(math.floor(s["lon"] / CELL)))].append(sid)
@@ -375,7 +375,7 @@ def main():
                 s["olat"], s["olon"] = s["lat"], s["lon"]
             orig = [(s["lat"], s["lon"]) for s in real]
 
-            # 1-2. Itinéraire entre gares consécutives
+            # 1-2. Route between consecutive stations
             paths = []
             for k in range(len(real) - 1):
                 key = (real[k]["id"], real[k + 1]["id"])
@@ -390,14 +390,14 @@ def main():
                     fallbacks.append("%s : %s → %s" % (br["id"], real[k]["name"], real[k + 1]["name"]))
                 paths.append(routes[key])
 
-            # Gare recalée sur la voie
+            # Station snapped to the track
             snap = []
             for k in range(len(real)):
                 inc = paths[k - 1] if k > 0 else None
                 out = paths[k] if k < len(paths) else None
                 snap.append(inc[-1] if inc else out[0] if out else orig[k])
 
-            poly = [snap[0]]          # tracé complet (pour l'étape 3)
+            poly = [snap[0]]          # full track geometry (for step 3)
             seq = [("st", 0)]
             for k, path in enumerate(paths):
                 a, b = snap[k], snap[k + 1]
@@ -409,7 +409,7 @@ def main():
                 poly.append(b)
                 seq.append(("st", k + 1))
 
-            # 3. Gares sur le tracé mais absentes de la branche
+            # 3. Stations on the track but missing from the branch
             own = {s["id"] for s in real}
             cum = [0.0]
             for p, q in zip(poly, poly[1:]):
@@ -427,7 +427,7 @@ def main():
                             if 1.0 < along < cum[-1] - 1.0:
                                 extra[sid] = (along, d, lerp(poly[i], poly[i + 1], t))
 
-            # Assemblage dans l'ordre du tracé
+            # Assembly in track order
             items = []
             pos = 0.0
             pi = 0
@@ -447,14 +447,16 @@ def main():
                        "lon": round(p[1], 6), "stop": sid in served, "ins": True,
                        "olat": s.get("olat", s["lat"]), "olon": s.get("olon", s["lon"])}
                 if s.get("idfm"):
-                    ins["idfm"] = s["idfm"]   # zones d'arrêt IDFM (temps réel PRIM)
+                    ins["idfm"] = s["idfm"]   # IDFM stop zones (PRIM real time)
+                if s.get("uic"):
+                    ins["uic"] = s["uic"]   # secondary UIC codes (SNCF real time)
                 if s.get("exits"):
-                    ins["exits"] = s["exits"]   # entrées de la gare (carte)
+                    ins["exits"] = s["exits"]   # station entrances (map)
                 items.append((along, 0, ins))
             items.sort(key=lambda x: (x[0], x[1]))
             br["stations"] = [x[2] for x in items]
 
-        # 4. Branches redondantes (desserte incluse dans une autre branche de la ligne)
+        # 4. Redundant branches (stopping pattern included in another branch of the line)
         def stops_of(b):
             return [s["id"] for s in b["stations"] if s.get("stop") and not s.get("wp")]
 

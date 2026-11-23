@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
-"""Génère lines.json (lignes, branches, gares, desserte) à partir des horaires GTFS.
+"""Generates lines.json (lines, branches, stations, stopping patterns) from the GTFS timetables.
 
-Usage, depuis le dossier du projet :
-    python3 Tools/build_gtfs.py              # télécharge les GTFS (cache build/cache/)
-    python3 Tools/build_shapes.py            # puis ajoute le tracé réel des voies
+Usage, from the project folder:
+    python3 Tools/build_gtfs.py              # downloads the GTFS files (cache build/cache/)
+    python3 Tools/build_shapes.py            # then adds the real track geometry
 
-Sources (horaires théoriques, licence ODbL / CGU SNCF) :
-  - IDFM : RER A à E et Transilien H J K L N P R U V
-  - SNCF : TER desservant une gare parisienne (Nord, Est, Lyon, Bercy, Austerlitz,
+Sources (scheduled timetables, ODbL license / SNCF terms of use):
+  - IDFM: RER A to E and Transilien H J K L N P R U V
+  - SNCF: TER serving a Paris station (Nord, Est, Lyon, Bercy, Austerlitz,
            Montparnasse, Saint-Lazare)
 
-Une ligne = une ligne commerciale (RER, Transilien) ou une relation TER.
-Une branche = un parcours type (suite ordonnée de gares desservies) ; les parcours
-inclus dans un autre (semi-directs, parcours partiels) sont fusionnés.
-Python 3.9+, bibliothèque standard uniquement (téléchargement via curl).
+A line = a commercial line (RER, Transilien) or a TER service.
+A branch = a typical route (ordered sequence of served stations); routes
+included in another (semi-fast, partial routes) are merged.
+Python 3.9+, standard library only (downloads via curl).
 """
 import argparse
 import csv
@@ -30,11 +30,11 @@ from collections import defaultdict
 
 IDFM_URL = ("https://data.iledefrance-mobilites.fr/explore/dataset/offre-horaires-tc-gtfs-idfm/"
             "files/a925e164271e4bca93433756d6a340d1/download/")
-# « Réseau SNCF TGV, Intercités et TER » (transport.data.gouv.fr, ressource 83582).
-# L'ancien export-opendata-sncf-gtfs.zip n'est plus mis à jour (horaires figés à juin 2026).
+# « Réseau SNCF TGV, Intercités et TER » (transport.data.gouv.fr, resource 83582).
+# The old export-opendata-sncf-gtfs.zip is no longer updated (timetables frozen at June 2026).
 SNCF_URL = "https://eu.ftp.opendatasoft.com/sncf/plandata/Export_OpenData_SNCF_GTFS_NewTripId.zip"
 
-# Lignes IDFM retenues : nom court GTFS → (identifiant, nom, groupe)
+# IDFM lines kept: GTFS short name → (identifier, name, group)
 IDFM_LINES = {
     "A": ("RER-A", "RER A", "RER"), "B": ("RER-B", "RER B", "RER"), "C": ("RER-C", "RER C", "RER"),
     "D": ("RER-D", "RER D", "RER"), "E": ("RER-E", "RER E", "RER"),
@@ -45,7 +45,7 @@ IDFM_LINES = {
     "V": ("V", "Ligne V", "Transilien"),
 }
 
-# Gares terminus parisiennes (codes UIC)
+# Paris terminus stations (UIC codes)
 PARIS_TERMINI = {
     "87271007": "Paris-Nord", "87113001": "Paris-Est", "87686006": "Paris-Gare-de-Lyon",
     "87686667": "Paris-Bercy", "87547000": "Paris-Austerlitz", "87391003": "Paris-Montparnasse",
@@ -53,9 +53,9 @@ PARIS_TERMINI = {
     "87384008": "Paris-Saint-Lazare", "87271023": "Paris-Nord", "87686030": "Paris-Gare-de-Lyon",
 }
 
-MERGE_DIST = 150.0     # deux arrêts à moins de 150 m = la même gare
-MIN_TRIPS = 4          # parcours trop rares ignorés (travaux, détournements…)
-MIN_SHARE = 0.01       # … ou moins de 1 % des circulations de la ligne
+MERGE_DIST = 150.0     # two stops less than 150 m apart = the same station
+MIN_TRIPS = 4          # routes too rare are ignored (engineering works, diversions…)
+MIN_SHARE = 0.01       # … or less than 1 % of the line's trips
 R = 6371008.8
 
 
@@ -85,7 +85,7 @@ def read_csv(z, name):
 
 
 def zip_member(z, name, required=True):
-    """Nom du fichier dans l'archive (gère un éventuel sous-dossier)."""
+    """File name in the archive (handles a possible subfolder)."""
     for n in z.namelist():
         if n == name or n.endswith("/" + name):
             return n
@@ -99,7 +99,7 @@ def nice_name(s):
     return s[:1].upper() + s[1:] if s else s
 
 
-# --- Registre des gares (fusion des arrêts proches entre jeux de données) ----
+# --- Station registry (merging nearby stops across datasets) ----------------
 
 class Registry:
     CELL = 0.005
@@ -107,12 +107,15 @@ class Registry:
     def __init__(self):
         self.stations = {}
         self.grid = defaultdict(list)
+        # UIC codes merged into another station (halls of the same station, neighboring stops):
+        # SNCF real time may mention them, the app finds them through the "uic" field
+        self.aliases = defaultdict(set)
 
     def _key(self, lat, lon):
         return (int(lat // self.CELL), int(lon // self.CELL))
 
     def resolve(self, sid, name, lat, lon):
-        """Renvoie l'identifiant de la gare (une gare existante à moins de MERGE_DIST, sinon sid)."""
+        """Returns the station identifier (an existing station within MERGE_DIST, otherwise sid)."""
         if sid in self.stations:
             return sid
         ki, kj = self._key(lat, lon)
@@ -125,6 +128,8 @@ class Registry:
                     if d < MERGE_DIST and (best is None or d < best[1]):
                         best = (other, d)
         if best:
+            if UIC_RE.fullmatch(sid) and sid != best[0]:
+                self.aliases[best[0]].add(sid)
             return best[0]
         self.stations[sid] = {"id": sid, "name": name, "lat": round(lat, 6), "lon": round(lon, 6)}
         self.grid[(ki, kj)].append(sid)
@@ -132,7 +137,7 @@ class Registry:
 
 
 def load_stops(z):
-    """stop_id → (id de la zone d'arrêt, nom, lat, lon)."""
+    """stop_id → (stop zone id, name, lat, lon)."""
     rows = {r["stop_id"]: r for r in read_csv(z, zip_member(z, "stops.txt"))}
     out = {}
     for sid, r in rows.items():
@@ -147,10 +152,10 @@ def load_stops(z):
 
 
 def load_patterns(z, trip_route):
-    """{route_id: {tuple(stop_id…): nb_circulations}} pour les courses retenues.
+    """{route_id: {tuple(stop_id…): trip_count}} for the kept trips.
 
-    stop_times.txt peut dépasser le Go (bus IDFM inclus) : lecture brute, ligne à ligne,
-    en ne décodant que les courses retenues."""
+    stop_times.txt can exceed 1 GB (IDFM buses included): raw reading, line by line,
+    decoding only the kept trips."""
     name = zip_member(z, "stop_times.txt")
     seqs = defaultdict(list)
     with z.open(name) as f:
@@ -191,7 +196,7 @@ def load_patterns(z, trip_route):
 
 
 def load_calendar(z):
-    """{service_id: set(date « AAAAMMJJ »)} d'après calendar.txt et calendar_dates.txt."""
+    """{service_id: set(date "YYYYMMDD")} from calendar.txt and calendar_dates.txt."""
     import datetime as dt
     days = defaultdict(set)
     name = zip_member(z, "calendar.txt", required=False)
@@ -216,7 +221,7 @@ def load_calendar(z):
 
 
 def trip_stations(seq, to_station):
-    """Arrêts d'une course → [(gare, arrivée s, départ s)], deux quais d'une même gare fusionnés."""
+    """Stops of a trip → [(station, arrival s, departure s)], two platforms of the same station merged."""
     out = []
     for _, stop, arr, dep in seq:
         sid = to_station(stop)
@@ -234,7 +239,7 @@ def trip_stations(seq, to_station):
 
 
 def attach_trips(line, trips):
-    """Garde les courses dont la desserte suit une branche de la ligne, dans un sens ou l'autre."""
+    """Keeps the trips whose stopping pattern follows a branch of the line, in either direction."""
     index = [{s["id"]: i for i, s in enumerate(b["stations"])} for b in line["branches"]]
     kept = []
     for t in trips:
@@ -252,7 +257,7 @@ def attach_trips(line, trips):
 
 
 def hms(v):
-    """« HH:MM:SS » (heures > 24 admises) → secondes."""
+    """"HH:MM:SS" (hours > 24 allowed) → seconds."""
     try:
         h, m, sec = v.strip().split(":")
         return int(h) * 3600 + int(m) * 60 + int(sec)
@@ -261,10 +266,10 @@ def hms(v):
 
 
 def leg_times(line, pool):
-    """Temps de parcours théorique médian (s), hors arrêt, entre gares consécutives desservies.
+    """Median scheduled travel time (s), excluding stops, between consecutive served stations.
 
-    Clé « idA>idB » dans le sens de circulation : la marche n'est pas symétrique
-    (rampes, limitations, approche des grandes gares)."""
+    Key "idA>idB" in the direction of travel: running is not symmetric
+    (gradients, speed limits, approach to large stations)."""
     ids = {s["id"] for b in line["branches"] for s in b["stations"]}
     out = {}
     for (a, b), vals in pool.items():
@@ -274,7 +279,7 @@ def leg_times(line, pool):
     return dict(sorted(out.items()))
 
 
-# --- Parcours types → branches ------------------------------------------------
+# --- Typical routes → branches -------------------------------------------------
 
 def is_subseq(p, q):
     it = iter(q)
@@ -282,9 +287,9 @@ def is_subseq(p, q):
 
 
 def maximal_patterns(counted, with_subsumed=False):
-    """Garde les parcours fréquents qui ne sont inclus dans aucun autre (dans un sens ou l'autre).
+    """Keeps the frequent routes that are not included in any other (in either direction).
 
-    with_subsumed : renvoie aussi {parcours gardé: {extrémités des parcours inclus}}."""
+    with_subsumed: also returns {kept route: {ends of the included routes}}."""
     total = sum(counted.values())
     merged = defaultdict(int)
     for p, n in counted.items():
@@ -304,7 +309,7 @@ def maximal_patterns(counted, with_subsumed=False):
 
 
 def orient(p, stations):
-    """Sens canonique : du terminus le plus proche de Paris vers l'autre."""
+    """Canonical direction: from the terminus nearest to Paris towards the other."""
     centre = (48.8566, 2.3522)
     a, b = stations[p[0]], stations[p[-1]]
     da, db = hav(centre, (a["lat"], a["lon"])), hav(centre, (b["lat"], b["lon"]))
@@ -312,8 +317,8 @@ def orient(p, stations):
 
 
 def align(patterns, stations):
-    """Oriente tous les parcours d'une ligne dans le même sens que le plus long
-    (sinon « aller » voudrait dire est → ouest pour une branche du RER A et l'inverse pour une autre)."""
+    """Orients all the routes of a line in the same direction as the longest one
+    (otherwise "outbound" would mean east → west for one RER A branch and the opposite for another)."""
     oriented = [orient(p, stations) for p in patterns]
     ref = max(oriented, key=len)
     rank = {s: i for i, s in enumerate(ref)}
@@ -332,7 +337,7 @@ def make_branches(line_id, patterns, reg):
         st = [dict(reg.stations[s], stop=True) for s in p]
         for s in st:
             if s["id"] in PARIS_TERMINI:
-                s["name"] = PARIS_TERMINI[s["id"]]   # nom unique pour les halls d'une même gare
+                s["name"] = PARIS_TERMINI[s["id"]]   # unique name for the halls of the same station
         branches.append({
             "id": "%s-%d" % (line_id, k + 1),
             "name": "%s ↔ %s" % (st[0]["name"], st[-1]["name"]),
@@ -341,7 +346,7 @@ def make_branches(line_id, patterns, reg):
     branches.sort(key=lambda b: (b["stations"][0]["name"], b["stations"][-1]["name"]))
     for k, b in enumerate(branches):
         b["id"] = "%s-%d" % (line_id, k + 1)
-    # Deux parcours aux mêmes terminus : on les distingue par une gare propre à chacun
+    # Two routes with the same terminuses: tell them apart by a station specific to each
     by_name = defaultdict(list)
     for b in branches:
         by_name[b["name"]].append(b)
@@ -364,20 +369,20 @@ def dedupe_station_ids(pattern):
     return tuple(out)
 
 
-# --- SNCF : TER vers Paris ----------------------------------------------------
+# --- SNCF: TER to Paris --------------------------------------------------------
 
 UIC_RE = re.compile(r"(87\d{6})")
 
-REGIONAL_RAIL = "106"   # GTFS étendu : Regional Rail Service (NeTEx : RailSubmode regionalRail)
+REGIONAL_RAIL = "106"   # Extended GTFS: Regional Rail Service (NeTEx: RailSubmode regionalRail)
 
 
 def is_ter(route_type, stop_ids):
-    """Un parcours est-il un TER ?
+    """Is a route a TER?
 
-    1. Type de route GTFS étendu 106 (Regional Rail), s'il est publié ;
-       un autre type étendu (102 grandes lignes, 109 banlieue…) n'est pas un TER.
-    2. Sinon (type 2 générique, cas actuel du GTFS SNCF) : le mode commercial
-       encodé dans les points d'arrêt, « StopPoint:OCETrain TER-<UIC> »."""
+    1. Extended GTFS route type 106 (Regional Rail), if published;
+       another extended type (102 long distance, 109 suburban…) is not a TER.
+    2. Otherwise (generic type 2, the current case of the SNCF GTFS): the commercial mode
+       encoded in the stop points, "StopPoint:OCETrain TER-<UIC>"."""
     if route_type == REGIONAL_RAIL:
         return True
     if route_type.isdigit() and 100 <= int(route_type) <= 199:
@@ -388,11 +393,11 @@ def is_ter(route_type, stop_ids):
 def sncf_lines(path, reg):
     z = zipfile.ZipFile(path)
     agencies = {r["agency_id"]: r.get("agency_name", "") for r in read_csv(z, zip_member(z, "agency.txt"))}
-    # Trains (type 2 générique ou types ferroviaires étendus) ; le tri TER se fait par is_ter()
+    # Trains (generic type 2 or extended rail types); TER sorting is done by is_ter()
     routes = {}
     for r in read_csv(z, zip_member(z, "routes.txt")):
         rt = r.get("route_type", "")
-        if rt == "2" or (rt.isdigit() and 100 <= int(rt) <= 199):   # train, ou types ferroviaires étendus
+        if rt == "2" or (rt.isdigit() and 100 <= int(rt) <= 199):   # train, or extended rail types
             routes[r["route_id"]] = r
     trip_route = {r["trip_id"]: r["route_id"] for r in read_csv(z, zip_member(z, "trips.txt"))
                   if r["route_id"] in routes}
@@ -411,7 +416,7 @@ def sncf_lines(path, reg):
     calendar = load_calendar(z)
     meta = {r["trip_id"]: r for r in read_csv(z, zip_member(z, "trips.txt")) if r["trip_id"] in trip_route}
 
-    # Temps de parcours théoriques des TER, par couple de gares (toutes relations confondues)
+    # Scheduled TER travel times, per pair of stations (all services combined)
     ter_legs = defaultdict(list)
     for rid, by_pair in raw_legs.items():
         rtype = routes[rid].get("route_type", "")
@@ -422,12 +427,12 @@ def sncf_lines(path, reg):
             if sa != sb:
                 ter_legs[(sa, sb)] += vals
 
-    # Une ligne TER par couple (gare parisienne, destination finale) :
-    #  - les relations qui suivent le même chemin (C3, K3, P13… vers Chartres / Le Mans)
-    #    sont indiscernables sans connaître le train : elles forment une seule ligne ;
-    #  - les directions qui se séparent (Le Mans / Granville) sont des lignes distinctes.
-    # Un parcours inclus dans un plus long (Paris → Chartres dans Paris → Le Mans) rejoint
-    # la ligne du plus long ; ses terminus apparaissent en sous-titre (« Aussi : Chartres »).
+    # One TER line per pair (Paris station, final destination):
+    #  - services following the same path (C3, K3, P13… to Chartres / Le Mans)
+    #    can't be told apart without knowing the train: they form a single line;
+    #  - directions that split (Le Mans / Granville) are separate lines.
+    # A route included in a longer one (Paris → Chartres in Paris → Le Mans) joins
+    # the longer one's line; its terminuses appear as a subtitle (« Aussi : Chartres »).
     corridors = defaultdict(lambda: defaultdict(int))
     colors = defaultdict(lambda: defaultdict(int))
     for rid, counted in raw.items():
@@ -455,9 +460,9 @@ def sncf_lines(path, reg):
         for p in maximal:
             by_dest[far_end(p)].append(p)
 
-        # Une destination desservie en chemin par une ligne plus longue rejoint cette ligne
-        # (Nogent-le-Rotrou → ligne du Mans, Argentan → ligne de Granville) : même chemin,
-        # seule la desserte diffère (omnibus / semi-direct).
+        # A destination served along the way by a longer line joins that line
+        # (Nogent-le-Rotrou → Le Mans line, Argentan → Granville line): same path,
+        # only the stopping pattern differs (all stations / semi-fast).
         def km(p):
             return sum(hav((reg.stations[a]["lat"], reg.stations[a]["lon"]),
                            (reg.stations[b]["lat"], reg.stations[b]["lon"])) for a, b in zip(p, p[1:]))
@@ -488,7 +493,7 @@ def sncf_lines(path, reg):
                     name = reg.stations[e]["name"]
                     if e != dest and e not in PARIS_TERMINI and name not in also:
                         also.append(name)
-            # Ordre des « aussi » : le long de la ligne, depuis Paris
+            # Order of the "also" terminuses: along the line, from Paris
             ref = orient(max(pats, key=len), reg.stations)
             rank = {s: i for i, s in enumerate(ref)}
             ids_by_name = {reg.stations[s]["name"]: s for p in pats for s in p}
@@ -507,7 +512,7 @@ def sncf_lines(path, reg):
             })
             lines[-1]["legTimes"] = leg_times(lines[-1], ter_legs)
 
-    # Circulations TER (numéro de train, jours, horaires) pour reconnaître le train en cours
+    # TER trips (train number, days, times) to recognize the current train
     ter_trips = []
     for tid, seq in seqs.items():
         rid = trip_route[tid]
@@ -524,7 +529,7 @@ def sncf_lines(path, reg):
     return lines
 
 
-# --- IDFM : RER et Transilien -------------------------------------------------
+# --- IDFM: RER and Transilien ----------------------------------------------------
 
 def idfm_lines(path, reg):
     z = zipfile.ZipFile(path)
@@ -532,7 +537,7 @@ def idfm_lines(path, reg):
     for r in read_csv(z, zip_member(z, "routes.txt")):
         short = (r.get("route_short_name") or "").strip().upper()
         if r.get("route_type") in ("2", "1", "100", "109") and short in IDFM_LINES:
-            # Plusieurs route_id peuvent porter le même nom court : on regroupe
+            # Several route_id may have the same short name: they are grouped
             routes[r["route_id"]] = (short, r)
     trip_route = {r["trip_id"]: r["route_id"] for r in read_csv(z, zip_member(z, "trips.txt"))
                   if r["route_id"] in routes}
@@ -548,7 +553,7 @@ def idfm_lines(path, reg):
     calendar = load_calendar(z)
     meta = {r["trip_id"]: r for r in read_csv(z, zip_member(z, "trips.txt")) if r["trip_id"] in trip_route}
 
-    pools = defaultdict(lambda: defaultdict(list))   # {nom court: {(gareA, gareB): [s…]}}
+    pools = defaultdict(lambda: defaultdict(list))   # {short name: {(stationA, stationB): [s…]}}
     for rid, by_pair in raw_legs.items():
         short = routes[rid][0]
         for (a, b), vals in by_pair.items():
@@ -579,7 +584,7 @@ def idfm_lines(path, reg):
         })
         lines[-1]["legTimes"] = leg_times(lines[-1], pools[short])
 
-        # Circulations : numéro (trip_short_name) et code mission (trip_headsign, ex. « ROPO »)
+        # Trips: number (trip_short_name) and mission code (trip_headsign, e.g. « ROPO »)
         trips = []
         for tid, seq in seqs.items():
             if routes[trip_route[tid]][0] != short:
@@ -594,8 +599,8 @@ def idfm_lines(path, reg):
                 trips.append({"number": number, "mission": headsign[:8],
                               "days": calendar.get(m.get("service_id"), set()), "stops": tstops})
             else:
-                # RER A / B (RATP) : pas de numéro de train public, seulement un code mission
-                # (« QIKI »). Identifiant interne « ~CODE+heure de départ », jamais affiché tel quel.
+                # RER A / B (RATP): no public train number, only a mission code
+                # (« QIKI »). Internal identifier "~CODE+departure time", never shown as is.
                 code = number if number.isalpha() else (headsign if headsign.isalpha() and len(headsign) <= 6 else "")
                 code = code.upper()[:8]
                 synthetic = "~%s%04d" % (code or "X", tstops[0][2] // 60)
@@ -607,15 +612,15 @@ def idfm_lines(path, reg):
 
 
 def build_timetables(lines, ndays):
-    """Horaires embarqués : pour chaque ligne, ses circulations des `ndays` prochains jours.
+    """Bundled timetables: for each line, its trips over the next `ndays` days.
 
-    Format compact (JSON) :
-      from, to     : période couverte (AAAAMMJJ)
-      services     : jours de circulation, un bit par jour depuis `from` (chaîne hexadécimale)
-      lines[id]    : st (gares), trips = [numéro, mission, service, [gare, arrivée, départ, …]]
-                     heures en minutes depuis minuit du jour de circulation (> 1440 après minuit)."""
+    Compact format (JSON):
+      from, to     : period covered (YYYYMMDD)
+      services     : days of operation, one bit per day from `from` (hexadecimal string)
+      lines[id]    : st (stations), trips = [number, mission, service, [station, arrival, departure, …]]
+                     times in minutes since midnight of the day of operation (> 1440 after midnight)."""
     import datetime as dt
-    ndays = max(1, min(ndays, 64))   # un service = un entier 64 bits côté app
+    ndays = max(1, min(ndays, 64))   # a service = a 64-bit integer on the app side
     start = dt.date.today()
     window = [(start + dt.timedelta(days=i)).strftime("%Y%m%d") for i in range(ndays)]
     pos = {d: i for i, d in enumerate(window)}
@@ -653,11 +658,11 @@ def build_timetables(lines, ndays):
 
 
 def attach_idfm_refs(path, lines, radius=600):
-    """Identifiants IDFM de chaque gare d'Île-de-France, pour l'API temps réel PRIM.
+    """IDFM identifiers of each Île-de-France station, for the PRIM real-time API.
 
-    Champ `idfm` : zones d'arrêt ferrées (« monomodalStopPlace ») à moins de `radius` m,
-    de la plus proche à la plus lointaine, puis leurs zones de correspondance. L'app essaie
-    `STIF:StopArea:SP:<id>:` dans cet ordre jusqu'à trouver le train."""
+    Field `idfm`: rail stop zones ("monomodalStopPlace") within `radius` m,
+    from nearest to farthest, then their interchange zones. The app tries
+    `STIF:StopArea:SP:<id>:` in this order until it finds the train."""
     z = zipfile.ZipFile(path)
     monos = []
     for r in read_csv(z, zip_member(z, "stops.txt")):
@@ -691,11 +696,11 @@ def attach_idfm_refs(path, lines, radius=600):
 
 
 def attach_exits(path, lines, radius=250):
-    """Entrées / sorties des gares d'Île-de-France (GTFS IDFM, location_type = 2).
+    """Entrances / exits of Île-de-France stations (IDFM GTFS, location_type = 2).
 
-    Champ `exits` : [[nom, lat, lon], …], entrées rattachées à une zone d'arrêt de la gare
-    (champ `idfm`), à défaut celles à moins de `radius` m. Ordre : par nom (le GTFS n'indique
-    pas d'entrée principale)."""
+    Field `exits`: [[name, lat, lon], …], entrances attached to a stop zone of the station
+    (field `idfm`), failing that those within `radius` m. Order: by name (the GTFS does not give
+    a main entrance)."""
     z = zipfile.ZipFile(path)
     by_parent, allx = defaultdict(list), []
     for r in read_csv(z, zip_member(z, "stops.txt")):
@@ -729,16 +734,16 @@ URBAN_MODES = {"1": "metro", "0": "tram"}
 
 
 def urban_network(path):
-    """Métro et tramway d'Île-de-France, pour des tableaux en temps réel (PRIM) seulement.
+    """Île-de-France metro and tram, for real-time (PRIM) boards only.
 
-    Pas d'horaires détaillés : par ligne, un résumé par type de jour (premier et dernier
-    passage, intervalle médian en pointe, en heures creuses et en soirée) pour le repli sans
-    réseau. Par station (zone d'arrêt du mode) : nom, position, zones IDFM pour PRIM, lignes."""
+    No detailed timetables: per line, a summary per type of day (first and last
+    departure, median interval at peak, off-peak and evening times) for the fallback without
+    network. Per station (the mode's stop zone): name, position, IDFM zones for PRIM, lines."""
     import datetime as dt
     from statistics import median
     z = zipfile.ZipFile(path)
     rows = {r["stop_id"]: r for r in read_csv(z, zip_member(z, "stops.txt"))}
-    # Zones d'arrêts monomodales (une par mode) rattachées à chaque zone de correspondance
+    # Single-mode stop zones (one per mode) attached to each interchange zone
     monos = defaultdict(list)
     for r in rows.values():
         if r["stop_id"].startswith("IDFM:monomodalStopPlace:") and r.get("parent_station"):
@@ -757,15 +762,15 @@ def urban_network(path):
     def tail(sid):
         return sid.rsplit(":", 1)[-1]
 
-    # Dates de référence : prochain mardi, samedi et dimanche
+    # Reference dates: next Tuesday, Saturday and Sunday
     today = dt.date.today()
     def next_day(wd):
         return (today + dt.timedelta(days=(wd - today.weekday()) % 7)).strftime("%Y%m%d")
     ref_days = {"wd": next_day(1), "sa": next_day(5), "su": next_day(6)}
 
     lines, stations = {}, {}
-    times = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))   # {ligne: {jour: {(arrêt, sens): [min]}}}
-    patterns = defaultdict(lambda: defaultdict(int))   # {ligne: {(station…): nb}}
+    times = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))   # {line: {day: {(stop, direction): [min]}}}
+    patterns = defaultdict(lambda: defaultdict(int))   # {line: {(station…): count}}
     for tid, seq in seqs.items():
         visited = []
         mode, short, r = routes[trip_route[tid]]
@@ -792,7 +797,7 @@ def urban_network(path):
                     lat, lon = round(float(area["stop_lat"]), 6), round(float(area["stop_lon"]), 6)
                 except (KeyError, ValueError):
                     continue
-                # PRIM : la zone de correspondance, puis ses zones monomodales (métro, tram…)
+                # PRIM: the interchange zone, then its single-mode zones (metro, tram…)
                 refs = [sid] + sorted(set(monos.get(area["stop_id"], [])))[:6] + ([tail(grand["stop_id"])] if grand else [])
                 st = stations[sid] = {"id": sid, "name": nice_name(area.get("stop_name") or ""),
                                       "lat": lat, "lon": lon, "refs": refs, "lines": []}
@@ -816,7 +821,7 @@ def urban_network(path):
             by_stop = times[lid].get(key) or {}
             if not by_stop:
                 continue
-            # Passages avant 4 h : fin de la nuit précédente (comptés après minuit)
+            # Departures before 4 am: end of the previous night (counted after midnight)
             all_t = [t + 1440 if t < 240 else t for ts in by_stop.values() for t in ts]
             ref = sorted(max(by_stop.values(), key=len))
             def gap(a, b):
@@ -824,7 +829,7 @@ def urban_network(path):
                 return int(round(median(g))) if g else None
             summary[key] = [min(all_t), max(all_t), gap(7, 9), gap(10, 16), gap(21, 24)]
         line["summary"] = summary
-        # Parcours (sens de marche) : les plus fréquents, sans ceux inclus dans un autre
+        # Routes (direction of travel): the most frequent ones, without those included in another
         counted = patterns[lid]
         total = sum(counted.values()) or 1
         keep = [p for p, n in counted.items() if n >= 10 and n >= 0.01 * total]
@@ -849,12 +854,25 @@ def urban_network(path):
     return {"lines": out_lines, "stations": out_st}
 
 
+def attach_uic_aliases(lines, reg):
+    """Adds to the stations their secondary UIC codes ("uic" field), used by SNCF real time."""
+    n = 0
+    for line in lines:
+        for b in line["branches"]:
+            for s in b["stations"]:
+                extra = sorted(reg.aliases.get(s["id"], ()))
+                if extra:
+                    s["uic"] = extra
+                    n += 1
+    return n
+
+
 def _idfm_station(stop):
     area, name, lat, lon = stop
     return (area, nice_name(name), lat, lon)
 
 
-# --- Programme principal ------------------------------------------------------
+# --- Main program --------------------------------------------------------------
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
@@ -869,13 +887,14 @@ def main():
     sncf = args.sncf or download(SNCF_URL, os.path.join(args.cache, "sncf-gtfs.zip"))
     idfm = args.idfm or download(IDFM_URL, os.path.join(args.cache, "idfm-gtfs.zip"))
 
-    reg = Registry()   # SNCF d'abord : ses gares portent le code UIC
+    reg = Registry()   # SNCF first: its stations carry the UIC code
     print("→ Lecture du GTFS SNCF (TER)…")
     ter = sncf_lines(sncf, reg)
     print("→ Lecture du GTFS IDFM (RER, Transilien)… (peut prendre une minute)")
     idf = idfm_lines(idfm, reg)
 
     lines = idf + sorted(ter, key=lambda l: (l["group"], l["name"]))
+    n_alias = attach_uic_aliases(lines, reg)
     n_refs = attach_idfm_refs(idfm, lines)
     n_exits = attach_exits(idfm, lines)
     print("✓ entrées de gare pour %d gares (Île-de-France)" % n_exits)
@@ -911,6 +930,7 @@ def main():
     n_st = len({s["id"] for l in lines for b in l["branches"] for s in b["stations"]})
     print("\n✓ %d lignes, %d gares → %s" % (len(lines), n_st, args.out))
     print("✓ identifiants IDFM (temps réel PRIM) pour %d arrêts de branche" % n_refs)
+    print("✓ codes UIC secondaires (temps réel SNCF) pour %d arrêts de branche" % n_alias)
     n_tr = sum(len(t["trips"]) for t in timetables["lines"].values())
     print("✓ %d circulations du %s au %s → %s (%d Ko)" % (
         n_tr, timetables["from"], timetables["to"], tt_path, os.path.getsize(tt_path) // 1024))
